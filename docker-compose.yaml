@@ -19,7 +19,7 @@ services:
     networks:
       - gobang
     ports:
-      - "${PORT:-8080}:8080"
+      - "${AUTHPORT:-8080}:8080"
     depends_on:
       - gobang_db
   gobang_db:
