@@ -525,8 +525,9 @@ function appendChatMessage(user, msg) {
   chatMessages.push({ user, msg });
   const container = document.getElementById('chat-messages');
   const maxMsgs = 100;
-  if (chatMessages.length > maxMsgs) {
-    chatMessages = chatMessages.slice(-maxMsgs);
+  while (chatMessages.length > maxMsgs) {
+    chatMessages.shift();
+    if (container.firstChild) container.removeChild(container.firstChild);
   }
   const el = document.createElement('div');
   el.className = 'chat-msg';
