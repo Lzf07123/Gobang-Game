@@ -2,4 +2,6 @@
 .DS_Store
 python_server/__pycache__/
 libgobang.so
+*.o
 CLAUDE.md
+index.html

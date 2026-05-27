@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import asyncio
 import secrets
@@ -7,12 +8,22 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict, OrderedDict
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+)
+logger = logging.getLogger('gobang')
+
 from aiohttp import web
 from dotenv import load_dotenv
 
-from db import init_db, execute_query, check_env
+from db import (init_db, execute_query, check_env, save_game,
+    get_user_games, get_game_moves, get_user_stats,
+    init_active_games_table, save_active_game, update_active_game,
+    delete_active_game)
 from auth import register, login, verify_token
-from game_engine import check_winner_on_board, make_board, BOARD_SIZE
+from game_engine import check_winner_on_board, make_board, board_to_list, BOARD_SIZE
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
 
@@ -128,13 +139,29 @@ async def _timer_loop(room_id):
         winner_idx = 1 if color == 1 else 0
         winner_username = room['usernames'][winner_idx] or ('白方' if winner_idx == 1 else '黑方')
         room['state'] = 'finished'
+        room['_winner'] = winner_idx
         for ws in room['players']:
             if ws:
                 await _send(ws, {'type': 'game_over', 'winner': winner_username, 'reason': '对方超时'})
         await _broadcast_room(room_id, {'type': 'chat', 'username': '系统', 'message': f'{winner_username}获胜（对方超时）'})
-        _cleanup_room(room_id)
+        _save_game_record(room_id, winner_username, '对方超时')
+        _executor.submit(delete_active_game, room_id)
+        _start_rematch_timer(room_id)
     except asyncio.CancelledError:
         pass
+
+
+def _save_game_record(room_id, winner_username, reason):
+    """Persist finished game to database (fire-and-forget)."""
+    room = rooms.get(room_id)
+    if not room or room.get('matchmade') is False:
+        return
+    usernames = room.get('usernames', [])
+    black = usernames[0] if len(usernames) > 0 else None
+    white = usernames[1] if len(usernames) > 1 else None
+    moves = list(enumerate(room.get('moves', []), 1))
+    move_rows = [(i, m[0], m[1], m[2]) for i, m in moves]
+    _executor.submit(save_game, room_id, black, white, winner_username, reason, move_rows)
 
 
 def _cleanup_room(room_id):
@@ -143,7 +170,11 @@ def _cleanup_room(room_id):
     if _timer_task:
         _timer_task.cancel()
     room = rooms.pop(room_id, None)
+    _executor.submit(delete_active_game, room_id)
     if room:
+        # Notify spectators before cleanup
+        for ws in room.get('spectators', set()):
+            asyncio.ensure_future(_send(ws, {'type': 'room_closed', 'message': '房间已关闭'}))
         for ws in room.get('players', []):
             if ws:
                 info = clients.get(ws)
@@ -176,7 +207,8 @@ async def handle_register(request):
     password = body.get('password', '')
     try:
         ok, err = await _run_db(register, username, password)
-    except Exception:
+    except Exception as e:
+        logger.error(f"注册失败: {e}", exc_info=True)
         return web.json_response({'success': False, 'error': '服务器内部错误'}, status=500)
     if ok:
         return web.json_response({'success': True, 'user': {'username': username}})
@@ -193,7 +225,8 @@ async def handle_login(request):
     password = body.get('password', '')
     try:
         ok, result = await _run_db(login, username, password)
-    except Exception:
+    except Exception as e:
+        logger.error(f"登录失败: {e}", exc_info=True)
         return web.json_response({'success': False, 'error': '服务器内部错误'}, status=500)
     if ok:
         return web.json_response({'success': True, 'token': result, 'username': username})
@@ -219,10 +252,65 @@ async def handle_list_rooms(request):
     return web.json_response({'rooms': room_list})
 
 
+async def handle_games(request):
+    """Get game history for a user."""
+    username = request.query.get('username', '')
+    if not username:
+        return web.json_response({'games': []})
+    try:
+        games = await _run_db(get_user_games, username)
+        result = []
+        for g in (games or []):
+            result.append({
+                'id': g['id'],
+                'room_id': g['room_id'],
+                'black_username': g['black_username'],
+                'white_username': g['white_username'],
+                'winner': g['winner'],
+                'reason': g['reason'],
+                'total_moves': g['total_moves'],
+                'created_at': g['created_at'].isoformat() if hasattr(g['created_at'], 'isoformat') else str(g['created_at']),
+            })
+        return web.json_response({'games': result})
+    except Exception as e:
+        logger.error(f"查询对局记录失败: {e}", exc_info=True)
+        return web.json_response({'games': []})
+
+
+async def handle_game_detail(request):
+    """Get full game detail with moves."""
+    game_id = request.match_info.get('id', '')
+    if not game_id or not game_id.isdigit():
+        return web.json_response({'error': '无效的游戏ID'}, status=400)
+    try:
+        moves = await _run_db(get_game_moves, int(game_id))
+        return web.json_response({'moves': moves or []})
+    except Exception as e:
+        logger.error(f"查询棋谱详情失败: {e}", exc_info=True)
+        return web.json_response({'moves': []})
+
+
+async def handle_profile(request):
+    """Get user profile and stats."""
+    username = request.query.get('username', '')
+    if not username:
+        return web.json_response({'error': '缺少用户名'}, status=400)
+    try:
+        stats = await _run_db(get_user_stats, username)
+        return web.json_response({
+            'username': username,
+            'total_games': stats['total'] if stats else 0,
+            'wins': stats['wins'] if stats else 0,
+        })
+    except Exception as e:
+        logger.error(f"查询用户统计失败: {e}", exc_info=True)
+        return web.json_response({'username': username, 'total_games': 0, 'wins': 0})
+
+
 # ===== WebSocket handler =====
 
 async def handle_ws(request):
-    ws = web.WebSocketResponse(max_msg_size=65536)
+    ws = web.WebSocketResponse(max_msg_size=65536, heartbeat=30)
     await ws.prepare(request)
 
     # Connection limit check
@@ -279,6 +367,10 @@ async def _on_message(ws, raw):
         'leave_room': lambda: _handle_leave_room(ws),
         'move': lambda: _handle_move(ws, int(data['x']), int(data['y'])),
         'chat': lambda: _handle_chat(ws, data.get('message', '')),
+        'request_undo': lambda: _handle_request_undo(ws),
+        'undo_response': lambda: _handle_undo_response(ws, data.get('accept', False)),
+        'resign': lambda: _handle_resign(ws),
+        'rematch': lambda: _handle_rematch(ws),
     }
 
     handler = handlers.get(msg_type)
@@ -359,6 +451,10 @@ async def _handle_match(ws):
         })
         await _send(opponent, {'type': 'turn', 'color': 1})
         await _start_timer(room_id)
+        # Persist active game
+        _executor.submit(save_active_game, room_id,
+                         o_info['username'], info['username'],
+                         board_to_list(rooms[room_id]['board']), 1, [])
     else:
         waiting_queue[ws] = True
         await _send(ws, {'type': 'waiting', 'message': '等待对手...'})
@@ -543,6 +639,7 @@ async def _handle_leave_room(ws):
         await _broadcast_to_player(room, other_idx, {
             'type': 'game_over', 'winner': winner_username, 'reason': '对方离开了房间'
         })
+        _save_game_record(room_id, winner_username, '对方离开了房间')
         _cleanup_room(room_id)
     else:
         # Clean up if room is empty
@@ -588,31 +685,42 @@ async def _handle_move(ws, x, y):
     room['current_player'] = 2 if color == 1 else 1
     room['moves'].append((x, y, color))
 
+    # Persist updated game state
+    _executor.submit(update_active_game, room_id,
+                     board_to_list(room['board']),
+                     room['current_player'],
+                     list(room['moves']))
+
     # Cancel timer, will restart after broadcast
     await _cancel_timer(room_id)
 
     # Broadcast move
     await _broadcast_room(room_id, {'type': 'move', 'x': x, 'y': y, 'color': color})
 
-    # Check winner
-    winner = check_winner_on_board(room['board'])
+    # Check winner (only around the last placed piece)
+    winner, win_line = check_winner_on_board(room['board'], x, y)
     if winner:
         room['state'] = 'finished'
+        room['_winner'] = player_idx
         winner_username = room['usernames'][player_idx]
+        game_over_msg = {
+            'type': 'game_over',
+            'winner': winner_username,
+            'reason': '五子连珠',
+            'moves': room['moves'],
+            'win_line': win_line,
+        }
         for i, p in enumerate(room['players']):
             if p:
-                await _send(p, {
-                    'type': 'game_over',
-                    'winner': winner_username,
-                    'reason': '五子连珠',
-                    'moves': room['moves'],
-                })
+                await _send(p, game_over_msg)
         for s in room.get('spectators', set()):
-            await _send(s, {'type': 'game_over', 'winner': winner_username, 'reason': '五子连珠'})
+            await _send(s, {'type': 'game_over', 'winner': winner_username, 'reason': '五子连珠', 'win_line': win_line})
         await _broadcast_room(room_id, {
             'type': 'chat', 'username': '系统', 'message': f'{winner_username} 获胜（五子连珠）！'
         })
-        _cleanup_room(room_id)
+        _save_game_record(room_id, winner_username, '五子连珠')
+        _executor.submit(delete_active_game, room_id)
+        _start_rematch_timer(room_id)
     else:
         # Check for draw (board full)
         if len(room['moves']) >= BOARD_SIZE * BOARD_SIZE:
@@ -620,7 +728,9 @@ async def _handle_move(ws, x, y):
             for p in room['players']:
                 if p:
                     await _send(p, {'type': 'game_over', 'winner': '平局', 'reason': '棋盘已满'})
-            _cleanup_room(room_id)
+            _save_game_record(room_id, '平局', '棋盘已满')
+            _executor.submit(delete_active_game, room_id)
+            _start_rematch_timer(room_id)
             return
 
         # Notify next turn
@@ -649,6 +759,246 @@ async def _handle_chat(ws, message):
         'username': info['username'],
         'message': message.strip(),
     })
+
+
+async def _handle_request_undo(ws):
+    info = clients.get(ws)
+    if not info or not info['room_id']:
+        return
+
+    room_id = info['room_id']
+    room = rooms.get(room_id)
+    if not room or room['state'] != 'playing':
+        return
+
+    if room['players'][0] == ws:
+        player_idx = 0
+    elif room['players'][1] == ws:
+        player_idx = 1
+    else:
+        return
+
+    # Can only request undo on your own turn
+    color = 1 if player_idx == 0 else 2
+    if room['current_player'] != color:
+        await _send(ws, {'type': 'error', 'error': '只能在自己回合请求悔棋'})
+        return
+
+    # Need at least 2 moves to undo
+    if len(room['moves']) < 2:
+        await _send(ws, {'type': 'error', 'error': '暂无棋子可悔'})
+        return
+
+    # Limit undo requests to 3 per player per game
+    undo_key = f'_undo_count_{player_idx}'
+    count = room.setdefault(undo_key, 0)
+    if count >= 3:
+        await _send(ws, {'type': 'error', 'error': '本局悔棋次数已用完（3次）'})
+        return
+
+    # Forward request to opponent
+    other_idx = 1 - player_idx
+    other_ws = room['players'][other_idx]
+    if other_ws:
+        await _send(other_ws, {
+            'type': 'request_undo',
+            'from': info['username'],
+        })
+
+
+async def _handle_undo_response(ws, accept):
+    info = clients.get(ws)
+    if not info or not info['room_id']:
+        return
+
+    room_id = info['room_id']
+    room = rooms.get(room_id)
+    if not room or room['state'] != 'playing':
+        return
+
+    if room['players'][0] == ws:
+        player_idx = 0
+    elif room['players'][1] == ws:
+        player_idx = 1
+    else:
+        return
+
+    other_idx = 1 - player_idx
+    other_ws = room['players'][other_idx]
+    if not other_ws:
+        return
+
+    if not accept:
+        await _send(other_ws, {
+            'type': 'undo_response',
+            'accepted': False,
+            'message': '对方拒绝了悔棋请求',
+        })
+        return
+
+    # Validate moves: need at least 2 moves from different players
+    moves = room['moves']
+    if len(moves) < 2:
+        await _send(other_ws, {'type': 'error', 'error': '暂无棋子可悔'})
+        return
+
+    last_color = moves[-1][2]
+    prev_color = moves[-2][2]
+
+    # Remove opponent's last move and requester's last move
+    if last_color != prev_color:
+        moves.pop()
+        moves.pop()
+    else:
+        # Edge case: consecutive moves by same color (shouldn't happen, but handle gracefully)
+        moves.pop()
+
+    # Rebuild board from scratch with empty board as base
+    room['board'] = make_board()
+    for mx, my, mc in moves:
+        if 0 <= mx < BOARD_SIZE and 0 <= my < BOARD_SIZE:
+            room['board'][my][mx] = mc
+
+    # Increment undo count for requester
+    undo_key = f'_undo_count_{other_idx}'
+    room[undo_key] = room.get(undo_key, 0) + 1
+
+    # Restore turn to the requester (since we removed opponent's and requester's last moves)
+    request_color = 1 if other_idx == 0 else 2
+    room['current_player'] = request_color
+
+    # Cancel timer, restart for requester
+    await _cancel_timer(room_id)
+
+    # Broadcast undo to both players
+    await _broadcast_to_player(room, other_idx, {
+        'type': 'undo', 'board': board_to_list(room['board']), 'moves': room['moves'],
+    })
+    await _broadcast_to_player(room, player_idx, {
+        'type': 'undo', 'board': board_to_list(room['board']), 'moves': room['moves'],
+    })
+    for s in room.get('spectators', set()):
+        await _send(s, {'type': 'undo', 'board': room['board'], 'moves': room['moves']})
+
+    await _broadcast_to_player(room, other_idx, {'type': 'turn', 'color': request_color})
+    await _start_timer(room_id)
+
+
+async def _handle_resign(ws):
+    info = clients.get(ws)
+    if not info or not info['room_id']:
+        return
+
+    room_id = info['room_id']
+    room = rooms.get(room_id)
+    if not room or room['state'] != 'playing':
+        return
+
+    if room['players'][0] == ws:
+        player_idx = 0
+    elif room['players'][1] == ws:
+        player_idx = 1
+    else:
+        return
+
+    room['state'] = 'finished'
+    await _cancel_timer(room_id)
+
+    other_idx = 1 - player_idx
+    winner_username = room['usernames'][other_idx] or '对手'
+    loser_username = info['username']
+
+    for i, p in enumerate(room['players']):
+        if p:
+            await _send(p, {
+                'type': 'game_over',
+                'winner': winner_username,
+                'reason': f'{loser_username} 认输',
+                'moves': room['moves'],
+            })
+    for s in room.get('spectators', set()):
+        await _send(s, {'type': 'game_over', 'winner': winner_username, 'reason': f'{loser_username} 认输'})
+
+    await _broadcast_room(room_id, {
+        'type': 'chat', 'username': '系统', 'message': f'{loser_username} 认输，{winner_username} 获胜！'
+    })
+    _save_game_record(room_id, winner_username, '认输')
+    _executor.submit(delete_active_game, room_id)
+    _start_rematch_timer(room_id)
+
+
+async def _start_rematch_timer(room_id):
+    """Give players 60 seconds to rematch before cleaning up."""
+    async def _delayed_cleanup():
+        await asyncio.sleep(60)
+        room = rooms.get(room_id)
+        if room and room['state'] == 'finished':
+            _cleanup_room(room_id)
+    asyncio.create_task(_delayed_cleanup())
+
+
+async def _handle_rematch(ws):
+    """Handle rematch request from a player."""
+    info = clients.get(ws)
+    if not info or not info['room_id']:
+        return
+
+    room_id = info['room_id']
+    room = rooms.get(room_id)
+    if not room or room['state'] != 'finished':
+        await _send(ws, {'type': 'error', 'error': '当前无法再来一局'})
+        return
+
+    if room['players'][0] == ws:
+        player_idx = 0
+    elif room['players'][1] == ws:
+        player_idx = 1
+    else:
+        return
+
+    rematch_key = '_rematch_ready'
+    ready = room.setdefault(rematch_key, set())
+    ready.add(player_idx)
+
+    other_idx = 1 - player_idx
+    other_ws = room['players'][other_idx]
+
+    if len(ready) >= 2:
+        # Both ready, restart game with swapped colors
+        room.pop(rematch_key, None)
+        room['board'] = make_board()
+        room['moves'] = []
+        room['state'] = 'playing'
+
+        # Swap colors: previous black becomes white
+        prev_black_idx = 0 if room['_winner'] != 0 else 1
+        new_black_idx = 1 - prev_black_idx
+        room['players'] = [room['players'][new_black_idx], room['players'][1 - new_black_idx]]
+        room['usernames'] = [room['usernames'][new_black_idx], room['usernames'][1 - new_black_idx]]
+        room['current_player'] = 1
+
+        for i in range(2):
+            p = room['players'][i]
+            if p:
+                color = 1 if i == 0 else 2
+                await _send(p, {
+                    'type': 'start', 'color': color,
+                    'message': f'再来一局！您执{"黑" if color == 1 else "白"}',
+                    'room_id': room_id,
+                    'usernames': room['usernames'],
+                })
+        await _broadcast_to_player(room, 0, {'type': 'turn', 'color': 1})
+        await _start_timer(room_id)
+        for s in room.get('spectators', set()):
+            await _send(s, {'type': 'chat', 'username': '系统', 'message': '再来一局！新对局开始'})
+        # Persist new game
+        _executor.submit(save_active_game, room_id,
+                         room['usernames'][0], room['usernames'][1],
+                         board_to_list(room['board']), 1, [])
+    else:
+        await _send(ws, {'type': 'rematch_waiting', 'message': '等待对方确认...'})
+        if other_ws:
+            await _send(other_ws, {'type': 'rematch_request', 'from': info['username']})
 
 
 async def _periodic_cleanup(app):
@@ -733,12 +1083,20 @@ def main():
     port = int(os.getenv('PORT', '8080'))
 
     print("检查数据库连接...")
-    try:
-        init_db()
-        print("数据库初始化成功")
-    except Exception as e:
-        print(f"数据库初始化失败: {e}")
-        return
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            init_db()
+            init_active_games_table()
+            print("数据库初始化成功")
+            break
+        except Exception as e:
+            if attempt == max_retries:
+                print(f"数据库初始化失败（已重试{max_retries}次）: {e}")
+                return
+            delay = 2 ** (attempt - 1)
+            print(f"数据库连接失败: {e}，{delay}秒后重试({attempt}/{max_retries})...")
+            time.sleep(delay)
 
     print("游戏引擎已就绪")
 
@@ -747,6 +1105,9 @@ def main():
     app.router.add_post('/login', handle_login)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/api/rooms', handle_list_rooms)
+    app.router.add_get('/api/games', handle_games)
+    app.router.add_get('/api/games/{id}', handle_game_detail)
+    app.router.add_get('/api/profile', handle_profile)
     app.router.add_get('/ws', handle_ws)
 
     # Periodic cleanup task (fire-and-forget, don't await the infinite loop)

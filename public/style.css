@@ -321,6 +321,110 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   text-align: center;
 }
 
+/* ===== Profile ===== */
+.profile-area {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  padding: 0.2rem 0.5rem;
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+
+.profile-area:hover {
+  background: rgba(78, 205, 196, 0.1);
+}
+
+.avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #e94560, #ff6b6b);
+  color: white;
+  font-size: 0.9rem;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-panel {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  background: #16213e;
+  border: 1px solid rgba(78, 205, 196, 0.2);
+  border-radius: 12px;
+  padding: 1.2rem;
+  z-index: 150;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+  min-width: 200px;
+  animation: authFadeIn 0.2s ease-out;
+}
+
+.profile-content {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.profile-avatar-large {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #e94560, #ff6b6b);
+  color: white;
+  font-size: 1.3rem;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.profile-name {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.profile-stats {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.profile-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stat-label {
+  font-size: 0.7rem;
+  color: #888;
+}
+
+.stat-value {
+  font-size: 1.1rem;
+  font-weight: bold;
+  color: #4ecdc4;
+}
+
+/* ===== Game Actions ===== */
+.game-actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.8rem;
+  margin-top: 0.5rem;
+}
+
+.undo-request {
+  text-align: center;
+  max-width: 280px;
+}
+
 .timer-warning {
   color: #ff6b6b;
   animation: pulse 0.5s ease-in-out infinite alternate;
@@ -373,6 +477,7 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
 #canvas {
   border-radius: 8px;
   cursor: pointer;
+  touch-action: manipulation;
   background: #d4a76a;
   box-shadow: 0 4px 20px rgba(0,0,0,0.5);
   width: 480px;
@@ -607,7 +712,10 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* ===== Responsive ===== */
 @media (max-width: 700px) {
-  body { padding-top: 0.5rem; }
+  body {
+    padding-top: 0.5rem;
+    padding-bottom: env(safe-area-inset-bottom, 0.5rem);
+  }
 
   .game-layout {
     flex-direction: column;
@@ -621,13 +729,14 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   }
 
   #canvas {
-    width: min(95vw, 480px);
-    height: min(95vw, 480px);
+    width: min(95vw, 100vh - 280px);
+    height: min(95vw, 100vh - 280px);
   }
 
   .game-header {
     font-size: 0.85rem;
-    gap: 0.5rem;
+    gap: 0.4rem;
+    flex-wrap: wrap;
   }
 
   .chat-messages {
@@ -659,6 +768,40 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   .room-controls {
     padding: 0.6rem;
   }
+
+  .game-actions {
+    padding: 0 0.5rem;
+  }
+
+  .game-actions button,
+  #rematch-actions button {
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 0.9rem;
+  }
+
+  .profile-panel {
+    right: 10px;
+  }
+
+  button {
+    padding: 0.6rem 0.8rem;
+    min-height: 40px;
+  }
+
+  .btn-small {
+    padding: 0.4rem 0.7rem;
+    min-height: 36px;
+  }
+
+  .chat-panel.collapsed .chat-header {
+    cursor: pointer;
+  }
+
+  .overlay-content {
+    width: 95%;
+    max-height: 90vh;
+  }
 }
 
 @media (max-width: 400px) {
@@ -671,11 +814,117 @@ button:disabled { opacity: 0.35; cursor: not-allowed; }
   }
 }
 
+/* Landscape phone warning */
+@media (max-height: 500px) and (orientation: landscape) {
+  #canvas {
+    width: min(80vh, 380px);
+    height: min(80vh, 380px);
+  }
+
+  .game-layout {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .side-panel {
+    max-width: 200px;
+  }
+
+  .chat-messages {
+    height: 80px;
+  }
+}
+
 /* ===== Chat Collapse ===== */
 .chat-panel.collapsed .chat-messages,
 .chat-panel.collapsed .chat-input-row {
   display: none;
 }
+
+/* ===== Theme Selector ===== */
+.theme-selector {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0;
+  margin-top: 0.2rem;
+  border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+.theme-label {
+  font-size: 0.8rem;
+  color: rgba(255,255,255,0.5);
+}
+
+.theme-options {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.theme-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  flex: none;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.theme-dot:hover { transform: scale(1.15); }
+.theme-dot.active { border-color: #4ecdc4; }
+
+.theme-dot.classic { background: linear-gradient(135deg, #d4a76a, #c4944a); }
+.theme-dot.light { background: linear-gradient(135deg, #f0d9b5, #e8c97a); }
+.theme-dot.dark { background: linear-gradient(135deg, #2c3e50, #34495e); }
+.theme-dot.bamboo { background: linear-gradient(135deg, #a8c97e, #7ea85e); }
+
+/* ===== Board theme CSS overrides (body background tint) ===== */
+body[data-theme="classic"] { --body-bg: #1a1a2e; }
+body[data-theme="light"] {
+  --body-bg: #f5f0e8;
+  background: #f5f0e8;
+  color: #333;
+}
+body[data-theme="light"]::before {
+  background: linear-gradient(-45deg, #f5f0e8, #e8dcc8, #f0e6d0, #f5f0e8);
+  background-size: 400% 400%;
+}
+body[data-theme="dark"] {
+  --body-bg: #0d1117;
+  background: #0d1117;
+}
+body[data-theme="dark"]::before {
+  background: linear-gradient(-45deg, #0d1117, #161b22, #0d1117, #161b22);
+  background-size: 400% 400%;
+}
+body[data-theme="bamboo"] {
+  --body-bg: #1a2f1a;
+  background: #1a2f1a;
+}
+body[data-theme="bamboo"]::before {
+  background: linear-gradient(-45deg, #1a2f1a, #2d4a22, #1a2f1a, #2d4a22);
+  background-size: 400% 400%;
+}
+
+/* Sound toggle */
+#sound-toggle-btn {
+  flex: none;
+  font-size: 1.1rem;
+  padding: 0.3rem 0.5rem;
+  line-height: 1;
+}
+
+/* Copy room button */
+#copy-room-btn {
+  flex: none;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.5rem;
+  transition: transform 0.15s;
+}
+
+#copy-room-btn:active { transform: scale(0.9); }
 
 /* ===== Scrollbar ===== */
 .chat-messages::-webkit-scrollbar {

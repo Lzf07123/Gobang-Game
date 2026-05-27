@@ -11,10 +11,14 @@ let roomId = '';
 let roomPlayers = [];
 let spectatorCount = 0;
 let lastMove = null;  // {x, y}
+let winLine = null;   // [{x, y}, ...] 5 winning coordinates
 let chatMessages = [];
 let timerRemaining = 0;
 let timerInterval = null;
 let matching = false;  // currently in matchmaking queue
+let reconnectAttempts = 0;
+let reconnectTimer = null;
+const MAX_RECONNECT = 8;
 
 // Game records for replay
 let gameRecords = JSON.parse(localStorage.getItem('goban_records') || '[]');
@@ -47,22 +51,112 @@ const BOARD_PX = CELL * (SIZE - 1);   // 420
 
 // ===== Sound =====
 let audioCtx = null;
+let soundEnabled = localStorage.getItem('goban_sound') !== 'false';
 
-function playSound() {
+function toggleSound() {
+  soundEnabled = !soundEnabled;
+  localStorage.setItem('goban_sound', soundEnabled);
+  document.getElementById('sound-toggle-btn').textContent = soundEnabled ? '🔊' : '🔇';
+}
+
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playPlaceSound() {
+  if (!soundEnabled) return;
   try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
     osc.connect(gain);
-    gain.connect(audioCtx.destination);
+    gain.connect(ctx.destination);
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(600, audioCtx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(300, audioCtx.currentTime + 0.08);
-    gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
-    osc.start(audioCtx.currentTime);
-    osc.stop(audioCtx.currentTime + 0.12);
+    osc.frequency.setValueAtTime(600, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + 0.08);
+    gain.gain.setValueAtTime(0.25, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.12);
   } catch(e) { /* audio not available */ }
+}
+
+function playStartSound() {
+  if (!soundEnabled) return;
+  try {
+    const ctx = getAudioCtx();
+    [523, 659, 784].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      const t = ctx.currentTime + i * 0.12;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.2, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+      osc.start(t);
+      osc.stop(t + 0.15);
+    });
+  } catch(e) {}
+}
+
+function playWinSound() {
+  if (!soundEnabled) return;
+  try {
+    const ctx = getAudioCtx();
+    [523, 659, 784, 1047].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      const t = ctx.currentTime + i * 0.15;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.2, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+      osc.start(t);
+      osc.stop(t + 0.25);
+    });
+  } catch(e) {}
+}
+
+function playLoseSound() {
+  if (!soundEnabled) return;
+  try {
+    const ctx = getAudioCtx();
+    [400, 350, 300].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'triangle';
+      const t = ctx.currentTime + i * 0.2;
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(0.2, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+      osc.start(t);
+      osc.stop(t + 0.3);
+    });
+  } catch(e) {}
+}
+
+function playTickSound() {
+  if (!soundEnabled) return;
+  try {
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1200, ctx.currentTime);
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.05);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.05);
+  } catch(e) {}
 }
 
 // ===== Auth =====
@@ -135,6 +229,8 @@ function showGameArea(user) {
   document.getElementById('auth-area').style.display = 'none';
   document.getElementById('game-area').style.display = 'flex';
   document.getElementById('username-display').textContent = user;
+  document.getElementById('avatar').textContent = user.charAt(0).toUpperCase();
+  document.getElementById('logout-btn').style.display = '';
   setStatus(`欢迎，${user}`);
 }
 
@@ -144,6 +240,8 @@ function showAuthArea() {
   document.getElementById('auth-area').style.display = '';
   document.getElementById('game-area').style.display = 'none';
   document.getElementById('cancel-match-btn').style.display = 'none';
+  document.getElementById('logout-btn').style.display = 'none';
+  document.getElementById('profile-panel').style.display = 'none';
   if (ws) {
     ws.onclose = null;
     ws.close();
@@ -153,25 +251,39 @@ function showAuthArea() {
 
 // ===== WebSocket =====
 function connectWS() {
-  if (ws) ws.close();
-  // Connect WITHOUT token in URL
+  if (ws) { ws.onclose = null; ws.close(); }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
   ws = new WebSocket(`${wsBase}/ws`);
   ws.onopen = () => {
-    // Send auth message immediately
+    reconnectAttempts = 0;
     ws.send(JSON.stringify({ type: 'auth', token }));
   };
   ws.onmessage = (e) => handleMessage(JSON.parse(e.data));
   ws.onclose = () => {
     ws = null;
     matching = false;
+    if (reconnectAttempts >= MAX_RECONNECT) {
+      setStatus('连接失败，请刷新页面重试');
+      reconnectAttempts = 0;
+      return;
+    }
     if (gameStarted || roomId) {
-      setStatus('连接已断开，请重新登录');
-      setTimeout(showAuthArea, 2000);
+      reconnectAttempts++;
+      const delay = Math.min(10000, 1000 * Math.pow(2, reconnectAttempts))
+                    + Math.random() * 1000;
+      setStatus(`连接断开，${Math.round(delay/1000)}秒后重连(${reconnectAttempts}/${MAX_RECONNECT})...`);
+      reconnectTimer = setTimeout(() => {
+        if (localStorage.getItem('goban_token')) connectWS();
+      }, delay);
     } else if (localStorage.getItem('goban_token')) {
-      setStatus('连接断开，正在重连...');
-      setTimeout(() => {
+      reconnectAttempts++;
+      const delay = Math.min(10000, 1000 * Math.pow(2, reconnectAttempts))
+                    + Math.random() * 500;
+      setStatus(`连接断开，正在重连(${reconnectAttempts}/${MAX_RECONNECT})...`);
+      reconnectTimer = setTimeout(() => {
         if (!ws && localStorage.getItem('goban_token')) connectWS();
-      }, 2000);
+      }, delay);
     }
   };
   ws.onerror = () => {};
@@ -212,7 +324,12 @@ function handleMessage(data) {
       document.getElementById('cancel-match-btn').style.display = 'none';
       hideRoomControls();
       showRoomInfo();
+      document.getElementById('game-actions').style.display = '';
+      document.getElementById('rematch-actions').style.display = 'none';
+      document.getElementById('rematch-btn').disabled = false;
+      document.getElementById('rematch-btn').textContent = '再来一局';
       drawBoard();
+      playStartSound();
       break;
 
     case 'turn':
@@ -225,8 +342,7 @@ function handleMessage(data) {
       lastMove = {x: data.x, y: data.y};
       if (!isSpectator) {
         currentMoves.push(data);
-        // Wait for own move confirmation too
-        if (data.color !== myColor) playSound();
+        if (data.color !== myColor) playPlaceSound();
       }
       drawBoard();
       animatePiece(data.x, data.y, data.color);
@@ -235,14 +351,23 @@ function handleMessage(data) {
     case 'game_over':
       gameStarted = false;
       matching = false;
+      winLine = data.win_line || null;
       document.getElementById('cancel-match-btn').style.display = 'none';
+      document.getElementById('game-actions').style.display = 'none';
       stopTimer();
-      const reason = data.reason ? `（${data.reason}）` : '';
-      setStatus(`游戏结束：${data.winner} ${reason}`);
+      const goReason = data.reason ? `（${data.reason}）` : '';
+      setStatus(`游戏结束：${data.winner} ${goReason}`);
       document.getElementById('match-btn').disabled = false;
-      document.getElementById('match-btn').textContent = '再来一局';
+      document.getElementById('match-btn').textContent = '开始匹配';
       document.getElementById('create-room-btn').disabled = false;
-      // Save game record
+      if (!isSpectator && roomId) {
+        document.getElementById('rematch-actions').style.display = '';
+      }
+      if (data.winner === username) {
+        playWinSound();
+      } else if (data.winner !== '平局') {
+        playLoseSound();
+      }
       if (data.moves) {
         currentMoves = data.moves;
       }
@@ -250,6 +375,17 @@ function handleMessage(data) {
         const opponent = roomPlayers.find(p => p && p !== username) || '对手';
         saveGameRecord(opponent, data.winner, currentMoves);
       }
+      break;
+
+    case 'rematch_request':
+      setStatus(`${data.from} 邀请你再来一局`);
+      document.getElementById('rematch-actions').style.display = '';
+      break;
+
+    case 'rematch_waiting':
+      setStatus('已发送再来一局请求，等待对方确认...');
+      document.getElementById('rematch-btn').disabled = true;
+      document.getElementById('rematch-btn').textContent = '等待中...';
       break;
 
     case 'match_cancelled':
@@ -316,10 +452,50 @@ function handleMessage(data) {
       appendChatMessage(data.username, data.message);
       break;
 
+    case 'room_closed':
+      if (!replayMode) {
+        resetGameState();
+        document.getElementById('match-btn').disabled = false;
+        document.getElementById('match-btn').textContent = '开始匹配';
+        document.getElementById('create-room-btn').disabled = false;
+        document.getElementById('room-controls').style.display = '';
+        hideRoomInfo();
+        hideSpectatorInfo();
+        drawBoard();
+        setStatus(data.message || '房间已关闭');
+      }
+      break;
+
+    // Undo
+    case 'request_undo':
+      document.getElementById('undo-message').textContent = `${data.from} 请求悔棋`;
+      document.getElementById('undo-overlay').style.display = 'flex';
+      break;
+
+    case 'undo_response':
+      document.getElementById('undo-overlay').style.display = 'none';
+      if (!data.accepted) {
+        setStatus('悔棋请求被拒绝');
+      }
+      break;
+
+    case 'undo':
+      board = data.board.map(row => row.slice());
+      currentMoves = data.moves.slice();
+      lastMove = currentMoves.length > 0
+        ? { x: currentMoves[currentMoves.length - 1][0], y: currentMoves[currentMoves.length - 1][1] }
+        : null;
+      drawBoard();
+      setStatus('已悔棋');
+      break;
+
     // Timer
     case 'timer':
       timerRemaining = data.remaining;
       updateTimerDisplay();
+      if (timerRemaining <= 5 && timerRemaining > 0 && myTurn) {
+        playTickSound();
+      }
       break;
   }
 }
@@ -394,6 +570,60 @@ function showRoomInfo() {
   el.querySelector('.room-players').textContent =
     roomPlayers.filter(Boolean).join(' vs ') || '等待对手...';
   document.getElementById('leave-btn').style.display = '';
+  document.getElementById('copy-room-btn').style.display = '';
+}
+
+function copyRoomCode() {
+  if (!roomId) return;
+  const btn = document.getElementById('copy-room-btn');
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(roomId).then(() => {
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = '📋'; }, 1500);
+    }).catch(() => {
+      btn.textContent = '✗';
+      setTimeout(() => { btn.textContent = '📋'; }, 1500);
+    });
+  } else {
+    const input = document.createElement('input');
+    input.value = roomId;
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    document.body.removeChild(input);
+    btn.textContent = '✓';
+    setTimeout(() => { btn.textContent = '📋'; }, 1500);
+  }
+}
+
+// ===== Theme =====
+const THEME_KEY = 'goban_theme';
+
+function setTheme(name) {
+  document.body.setAttribute('data-theme', name);
+  localStorage.setItem(THEME_KEY, name);
+  document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
+  const dot = document.querySelector(`.theme-dot.${name}`);
+  if (dot) dot.classList.add('active');
+  drawBoard();
+}
+
+function getThemeColors() {
+  const themes = {
+    classic: { bg: '#d4a76a', grid: '#333', star: '#333', black1: '#555', black2: '#111', white1: '#fff', white2: '#ccc', lastMove: '#ff4444', winGlow: '255,215,0', label: '#666' },
+    light:   { bg: '#f0d9b5', grid: '#555', star: '#555', black1: '#333', black2: '#000', white1: '#fff', white2: '#ddd', lastMove: '#e74c3c', winGlow: '231,76,60', label: '#888' },
+    dark:    { bg: '#2c3e50', grid: '#5d7b93', star: '#7f9cb5', black1: '#bdc3c7', black2: '#2c3e50', white1: '#ecf0f1', white2: '#bdc3c7', lastMove: '#e74c3c', winGlow: '241,196,15', label: '#7f9cb5' },
+    bamboo:  { bg: '#a8c97e', grid: '#4a6741', star: '#4a6741', black1: '#2d3436', black2: '#111', white1: '#f5f5dc', white2: '#e8e8c0', lastMove: '#d63031', winGlow: '255,215,0', label: '#5a7a4a' },
+  };
+  return themes[localStorage.getItem(THEME_KEY) || 'classic'];
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY) || 'classic';
+  document.body.setAttribute('data-theme', saved);
+  document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
+  const dot = document.querySelector(`.theme-dot.${saved}`);
+  if (dot) dot.classList.add('active');
 }
 
 function hideRoomInfo() {
@@ -442,6 +672,66 @@ function startMatch() {
   document.getElementById('create-room-btn').disabled = true;
   document.getElementById('room-controls').style.display = 'none';
   document.getElementById('cancel-match-btn').style.display = '';
+}
+
+// ===== Rematch =====
+function requestRematch() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'rematch' }));
+  setStatus('已发送再来一局请求...');
+  document.getElementById('rematch-btn').disabled = true;
+  document.getElementById('rematch-btn').textContent = '等待中...';
+}
+
+// ===== Undo =====
+function requestUndo() {
+  if (!ws || !gameStarted || !myTurn) return;
+  ws.send(JSON.stringify({ type: 'request_undo' }));
+  setStatus('已发送悔棋请求...');
+}
+
+function respondUndo(accept) {
+  if (!ws) return;
+  ws.send(JSON.stringify({ type: 'undo_response', accept }));
+  document.getElementById('undo-overlay').style.display = 'none';
+}
+
+// ===== Resign =====
+function doResign() {
+  if (!ws || !gameStarted) return;
+  if (!confirm('确定要认输吗？')) return;
+  ws.send(JSON.stringify({ type: 'resign' }));
+}
+
+// ===== Profile =====
+async function toggleProfile() {
+  const panel = document.getElementById('profile-panel');
+  if (panel.style.display === 'none' || !panel.style.display) {
+    panel.style.display = 'block';
+    try {
+      const resp = await fetch(`${httpBase}/api/profile?username=${encodeURIComponent(username)}`);
+      const data = await resp.json();
+      document.getElementById('stat-total').textContent = data.total_games || 0;
+      document.getElementById('stat-wins').textContent = data.wins || 0;
+      const rate = data.total_games > 0 ? Math.round((data.wins / data.total_games) * 100) + '%' : '-';
+      document.getElementById('stat-rate').textContent = rate;
+    } catch(e) {
+      document.getElementById('stat-total').textContent = '0';
+      document.getElementById('stat-wins').textContent = '0';
+      document.getElementById('stat-rate').textContent = '-';
+    }
+    document.querySelector('.profile-name').textContent = username;
+    document.querySelector('.profile-avatar-large').textContent = username.charAt(0).toUpperCase();
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+function doLogout() {
+  localStorage.removeItem('goban_token');
+  localStorage.removeItem('goban_username');
+  document.getElementById('profile-panel').style.display = 'none';
+  showAuthArea();
 }
 
 function cancelMatch() {
@@ -582,35 +872,63 @@ function saveGameRecord(opponent, result, moves) {
   gameRecords = records.slice(0, 50);
 }
 
-function showReplayList() {
-  const records = JSON.parse(localStorage.getItem('goban_records') || '[]');
+async function showReplayList() {
   const overlay = document.getElementById('replay-list');
   const list = overlay.querySelector('.replay-items');
-  list.innerHTML = '';
-  if (records.length === 0) {
-    list.innerHTML = '<div class="replay-empty">暂无对局记录</div>';
-  } else {
-    records.forEach((rec, idx) => {
-      const el = document.createElement('div');
-      el.className = 'replay-item';
-      const date = new Date(rec.date);
-      const dateStr = `${date.getMonth()+1}/${date.getDate()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`;
-      el.innerHTML = `
-        <span class="replay-info">${dateStr} vs ${rec.opponent}</span>
-        <span class="replay-result">${rec.result}</span>
-        <button onclick="startReplay(${idx})">回放</button>
-      `;
-      list.appendChild(el);
-    });
-  }
+  list.innerHTML = '<div class="replay-empty">加载中...</div>';
   overlay.style.display = 'flex';
+
+  let serverGames = [];
+  try {
+    const resp = await fetch(`${httpBase}/api/games?username=${encodeURIComponent(username)}`);
+    const data = await resp.json();
+    serverGames = data.games || [];
+  } catch(e) { /* fallback to localStorage */ }
+
+  if (serverGames.length === 0) {
+    // Fallback to localStorage
+    const records = JSON.parse(localStorage.getItem('goban_records') || '[]');
+    list.innerHTML = '';
+    if (records.length === 0) {
+      list.innerHTML = '<div class="replay-empty">暂无对局记录</div>';
+    } else {
+      records.forEach((rec, idx) => {
+        const el = document.createElement('div');
+        el.className = 'replay-item';
+        const date = new Date(rec.date);
+        const dateStr = `${date.getMonth()+1}/${date.getDate()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`;
+        el.innerHTML = `
+          <span class="replay-info">${dateStr} vs ${rec.opponent}</span>
+          <span class="replay-result">${rec.result}</span>
+          <button onclick="startReplayLocal(${idx})">回放</button>
+        `;
+        list.appendChild(el);
+      });
+    }
+    return;
+  }
+
+  list.innerHTML = '';
+  serverGames.forEach(g => {
+    const el = document.createElement('div');
+    el.className = 'replay-item';
+    const opp = g.black_username === username ? g.white_username : g.black_username;
+    const date = new Date(g.created_at);
+    const dateStr = `${date.getMonth()+1}/${date.getDate()} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`;
+    el.innerHTML = `
+      <span class="replay-info">${dateStr} vs ${opp || '未知'}</span>
+      <span class="replay-result">${g.winner}</span>
+      <button onclick="startReplayServer(${g.id})">回放</button>
+    `;
+    list.appendChild(el);
+  });
 }
 
 function hideReplayList() {
   document.getElementById('replay-list').style.display = 'none';
 }
 
-function startReplay(idx) {
+function startReplayLocal(idx) {
   const records = JSON.parse(localStorage.getItem('goban_records') || '[]');
   if (!records[idx]) return;
   const rec = records[idx];
@@ -619,7 +937,6 @@ function startReplay(idx) {
   replayMode = true;
   document.getElementById('replay-list').style.display = 'none';
 
-  // Switch to replay mode in UI
   document.getElementById('replay-controls').style.display = '';
   document.getElementById('match-btn').disabled = true;
   document.getElementById('create-room-btn').disabled = true;
@@ -627,6 +944,37 @@ function startReplay(idx) {
 
   board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
   setStatus(`回放: ${rec.opponent} (${rec.result}) - 第 0 手`);
+  drawBoard();
+}
+
+async function startReplayServer(gameId) {
+  document.getElementById('replay-list').style.display = 'none';
+  let moves = [];
+  try {
+    const resp = await fetch(`${httpBase}/api/games/${gameId}`);
+    const data = await resp.json();
+    moves = (data.moves || []).map(m => ({ x: m.x, y: m.y, color: m.color }));
+  } catch(e) {
+    setStatus('加载对局失败');
+    return;
+  }
+
+  if (moves.length === 0) {
+    setStatus('对局无落子记录');
+    return;
+  }
+
+  replayMoves = moves;
+  replayIndex = -1;
+  replayMode = true;
+
+  document.getElementById('replay-controls').style.display = '';
+  document.getElementById('match-btn').disabled = true;
+  document.getElementById('create-room-btn').disabled = true;
+  document.getElementById('room-controls').style.display = 'none';
+
+  board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+  setStatus(`回放: 第 0 手 (共 ${moves.length} 手)`);
   drawBoard();
 }
 
@@ -643,7 +991,6 @@ function replayStep(forward) {
     const m = replayMoves[replayIndex];
     board[m.y][m.x] = 0;
     replayIndex--;
-    // Recalculate lastMove
     if (replayIndex >= 0) {
       const prev = replayMoves[replayIndex];
       lastMove = {x: prev.x, y: prev.y};
@@ -651,7 +998,15 @@ function replayStep(forward) {
       lastMove = null;
     }
   }
-  setStatus(`回放: 第 ${replayIndex + 1} 手 (共 ${replayMoves.length} 手)`);
+  if (replayIndex >= 0) {
+    const cur = replayMoves[replayIndex];
+    const col = String.fromCharCode(65 + cur.x);
+    const row = SIZE - cur.y;
+    const colName = (replayMoves[replayIndex].color === 1 ? '黑' : '白');
+    setStatus(`回放: 第 ${replayIndex + 1}/${replayMoves.length} 手 ${colName} ${col}${row}`);
+  } else {
+    setStatus(`回放: 第 0 手 (共 ${replayMoves.length} 手)`);
+  }
   drawBoard();
 }
 
@@ -672,14 +1027,15 @@ function exitReplay() {
 // ===== Board Drawing =====
 function drawBoard() {
   const w = canvas.width, h = canvas.height;
+  const theme = getThemeColors();
   ctx.clearRect(0, 0, w, h);
 
   // Background
-  ctx.fillStyle = '#d4a76a';
+  ctx.fillStyle = theme.bg;
   ctx.fillRect(0, 0, w, h);
 
   // Grid lines
-  ctx.strokeStyle = '#333';
+  ctx.strokeStyle = theme.grid;
   ctx.lineWidth = 1;
   for (let i = 0; i < SIZE; i++) {
     const p = PAD + i * CELL;
@@ -695,7 +1051,7 @@ function drawBoard() {
 
   // Star points
   const stars = [[3,3], [3,7], [3,11], [7,3], [7,7], [7,11], [11,3], [11,7], [11,11]];
-  ctx.fillStyle = '#333';
+  ctx.fillStyle = theme.star;
   for (const [sx, sy] of stars) {
     ctx.beginPath();
     ctx.arc(PAD + sx * CELL, PAD + sy * CELL, 3, 0, Math.PI * 2);
@@ -705,17 +1061,38 @@ function drawBoard() {
   // Pieces
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
-      if (board[y][x] !== 0) drawPiece(x, y, board[y][x]);
+      if (board[y][x] !== 0) drawPiece(x, y, board[y][x], 1, theme);
     }
   }
 
   // Last move marker
   if (lastMove && board[lastMove.y][lastMove.x] !== 0) {
-    drawLastMoveMarker(lastMove.x, lastMove.y, board[lastMove.y][lastMove.x]);
+    drawLastMoveMarker(lastMove.x, lastMove.y, board[lastMove.y][lastMove.x], theme);
+  }
+
+  // Win line highlight
+  if (winLine && winLine.length === 5) {
+    drawWinLineHighlight(winLine, theme);
+  }
+
+  // Replay move numbers
+  if (replayMode && replayIndex >= 0) {
+    for (let i = 0; i <= replayIndex; i++) {
+      const m = replayMoves[i];
+      if (board[m.y] && board[m.y][m.x] !== 0) {
+        const cx = PAD + m.x * CELL;
+        const cy = PAD + m.y * CELL;
+        ctx.fillStyle = board[m.y][m.x] === 1 ? '#ddd' : '#333';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(i + 1, cx, cy);
+      }
+    }
   }
 
   // Coordinate labels
-  ctx.fillStyle = '#666';
+  ctx.fillStyle = theme.label;
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -729,7 +1106,8 @@ function drawBoard() {
   }
 }
 
-function drawPiece(x, y, color, scale) {
+function drawPiece(x, y, color, scale, theme) {
+  const t = theme || getThemeColors();
   const cx = PAD + x * CELL;
   const cy = PAD + y * CELL;
   const r = (CELL * 0.42) * (scale || 1);
@@ -739,13 +1117,13 @@ function drawPiece(x, y, color, scale) {
 
   if (color === 1) {
     const grad = ctx.createRadialGradient(cx - 3, cy - 3, 2, cx, cy, r);
-    grad.addColorStop(0, '#555');
-    grad.addColorStop(1, '#111');
+    grad.addColorStop(0, t.black1);
+    grad.addColorStop(1, t.black2);
     ctx.fillStyle = grad;
   } else {
     const grad = ctx.createRadialGradient(cx - 3, cy - 3, 2, cx, cy, r);
-    grad.addColorStop(0, '#fff');
-    grad.addColorStop(1, '#ccc');
+    grad.addColorStop(0, t.white1);
+    grad.addColorStop(1, t.white2);
     ctx.fillStyle = grad;
   }
   ctx.fill();
@@ -754,15 +1132,36 @@ function drawPiece(x, y, color, scale) {
   ctx.stroke();
 }
 
-function drawLastMoveMarker(x, y, color) {
+function drawLastMoveMarker(x, y, color, theme) {
+  const t = theme || getThemeColors();
   const cx = PAD + x * CELL;
   const cy = PAD + y * CELL;
   const r = 4;
 
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fillStyle = color === 1 ? '#ff4444' : '#ff4444';
+  ctx.fillStyle = t.lastMove;
   ctx.fill();
+}
+
+function drawWinLineHighlight(points, theme) {
+  const t = theme || getThemeColors();
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+  for (const p of points) {
+    const cx = PAD + p[0] * CELL;
+    const cy = PAD + p[1] * CELL;
+    ctx.beginPath();
+    ctx.arc(cx, cy, CELL * 0.45, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${t.winGlow}, ${0.5 + pulse * 0.5})`;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, CELL * 0.48, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${t.winGlow}, ${0.2 + pulse * 0.3})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  if (winLine) requestAnimationFrame(() => drawBoard());
 }
 
 function animatePiece(x, y, color) {
@@ -776,14 +1175,12 @@ function animatePiece(x, y, color) {
     if (!start) start = timestamp;
     const elapsed = timestamp - start;
     const progress = Math.min(elapsed / ANIMATION_DURATION, 1);
-
-    // Ease out bounce
     const easeOut = 1 - Math.pow(1 - progress, 3);
     const scale = easeOut;
 
-    // We need to redraw board underneath then draw scaled piece
     drawBoard();
-    drawPiece(x, y, color, scale);
+    const theme = getThemeColors();
+    drawPiece(x, y, color, scale, theme);
     elapsed < ANIMATION_DURATION ? requestAnimationFrame(frame) : drawBoard();
   }
   requestAnimationFrame(frame);
@@ -794,10 +1191,11 @@ function handleCanvasInput(clientX, clientY) {
   if (!gameStarted || !myTurn || isSpectator) return;
 
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const px = (clientX - rect.left) * scaleX;
-  const py = (clientY - rect.top) * scaleY;
+  const dpr = window.devicePixelRatio || 1;
+  // Convert CSS-pixel click position to logical drawing coordinates.
+  // canvas.width = size * dpr, so dividing by dpr yields logical space.
+  const px = (clientX - rect.left) * (canvas.width / rect.width) / dpr;
+  const py = (clientY - rect.top) * (canvas.height / rect.height) / dpr;
 
   let bestDist = Infinity, bx = -1, by = -1;
   for (let y = 0; y < SIZE; y++) {
@@ -859,7 +1257,11 @@ function resetGameState() {
   hideRoomInfo();
   hideSpectatorInfo();
   document.getElementById('cancel-match-btn').style.display = 'none';
+  document.getElementById('game-actions').style.display = 'none';
+  document.getElementById('rematch-actions').style.display = 'none';
+  document.getElementById('undo-overlay').style.display = 'none';
   board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+  winLine = null;
   currentMoves = [];
   chatMessages = [];
   document.getElementById('chat-messages').innerHTML = '';
@@ -867,11 +1269,15 @@ function resetGameState() {
 
 // ===== Canvas Sizing (Responsive) =====
 function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
   const maxWidth = Math.min(window.innerWidth - 40, 480);
   const maxHeight = window.innerHeight - 220;
   const size = Math.min(maxWidth, maxHeight, 480);
+  canvas.width = size * dpr;
+  canvas.height = size * dpr;
   canvas.style.width = size + 'px';
   canvas.style.height = size + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
 window.addEventListener('resize', resizeCanvas);
@@ -883,8 +1289,19 @@ function toggleChat() {
   panel.classList.toggle('collapsed');
 }
 
+// ===== Click outside to close profile =====
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('profile-panel');
+  const profileArea = document.getElementById('profile-area');
+  if (panel.style.display !== 'none' && !panel.contains(e.target) && !profileArea.contains(e.target)) {
+    panel.style.display = 'none';
+  }
+});
+
 // ===== Auto-login from localStorage =====
 (function init() {
+  initTheme();
+  document.getElementById('sound-toggle-btn').textContent = soundEnabled ? '🔊' : '🔇';
   const savedToken = localStorage.getItem('goban_token');
   const savedUsername = localStorage.getItem('goban_username');
   if (savedToken && savedUsername) {

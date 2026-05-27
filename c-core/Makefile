@@ -1,10 +1,22 @@
-all: libgobang.so
+CC = gcc
+CFLAGS = -fPIC -O2 -Wall -Wextra
+LDFLAGS = -shared
+TARGET = libgobang.so
+OBJS = board.o rules.o evaluate.o
 
-libgobang.so: gobang.c gobang.h
-	gcc -shared -fPIC -o libgobang.so gobang.c
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(LDFLAGS) -o $(TARGET) $(OBJS)
+
+board.o: board.c board.h
+	$(CC) $(CFLAGS) -c board.c
+
+rules.o: rules.c rules.h board.h
+	$(CC) $(CFLAGS) -c rules.c
+
+evaluate.o: evaluate.c evaluate.h board.h
+	$(CC) $(CFLAGS) -c evaluate.c
 
 clean:
-	rm -f libgobang.so
-
-run: all
-	cp libgobang.so ../python_server/
+	rm -f $(TARGET) $(OBJS)

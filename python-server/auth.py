@@ -1,10 +1,13 @@
 import os
+import re
 import secrets
 import bcrypt
 import jwt
 import time
 import mysql.connector
 from db import execute_query
+
+_USERNAME_RE = re.compile(r'^[\w一-鿿]{2,20}$')
 
 _JWT_SECRET = os.getenv('JWT_SECRET', '')
 if not _JWT_SECRET or _JWT_SECRET == 'your_jwt_secret_key_change_me':
@@ -39,10 +42,10 @@ def verify_token(token):
 
 
 def register(username, password):
-    if len(username) < 2 or len(username) > 50:
-        return False, "用户名长度需在2-50之间"
-    if len(password) < 4:
-        return False, "密码长度至少4位"
+    if not username or not _USERNAME_RE.match(username):
+        return False, "用户名仅支持中英文、数字、下划线，2-20个字符"
+    if len(password) < 6:
+        return False, "密码长度至少6位"
 
     existing = execute_query(
         "SELECT id FROM users WHERE username = %s", (username,)

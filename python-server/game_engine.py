@@ -6,36 +6,27 @@ EMPTY = 0
 BLACK = 1
 WHITE = 2
 
-
-def check_winner_on_board(board):
-    """Python implementation of win detection for any board state.
-    Supports multiple concurrent games unlike the singleton C engine."""
-    dirs = [(1, 0), (0, 1), (1, 1), (1, -1)]
-    for y in range(BOARD_SIZE):
-        for x in range(BOARD_SIZE):
-            c = board[y][x]
-            if c == EMPTY:
-                continue
-            for dx, dy in dirs:
-                cnt = 1
-                for s in range(1, 5):
-                    nx, ny = x + dx * s, y + dy * s
-                    if nx < 0 or nx >= BOARD_SIZE or ny < 0 or ny >= BOARD_SIZE:
-                        break
-                    if board[ny][nx] != c:
-                        break
-                    cnt += 1
-                if cnt >= 5:
-                    return c
-    return 0
+_board_t = (ctypes.c_int * BOARD_SIZE) * BOARD_SIZE
+_win_t = ctypes.c_int * 5
 
 
 def make_board():
-    """Create a fresh empty board."""
-    return [[EMPTY] * BOARD_SIZE for _ in range(BOARD_SIZE)]
+    """Create a zero-initialised ctypes 2D board array (maps directly to C int[15][15])."""
+    return _board_t()
+
+
+def board_to_list(board):
+    """Convert a ctypes board to a Python list-of-lists for JSON serialization."""
+    return [[board[y][x] for x in range(BOARD_SIZE)] for y in range(BOARD_SIZE)]
 
 
 class GameEngine:
+    """Singleton wrapping the C shared library.
+
+    The C library operates on caller-supplied board pointers, so every room's
+    ctypes board can be passed directly — no more per-call copy overhead.
+    """
+
     _instance = None
 
     def __new__(cls):
@@ -49,23 +40,68 @@ class GameEngine:
         if not os.path.exists(lib_path):
             raise RuntimeError(
                 f"C library not found at {lib_path}. "
-                "Run 'make' in c_core/ first."
+                "Run 'make' in c-core/ first."
             )
         self.lib = ctypes.CDLL(lib_path)
+
+        # board.h
+        self.lib.board_init.argtypes = []
+        self.lib.board_init.restype = None
         self.lib.place_piece.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
         self.lib.place_piece.restype = ctypes.c_int
-        self.lib.check_winner.restype = ctypes.c_int
+        self.lib.reset_game.argtypes = []
+        self.lib.reset_game.restype = None
         self.lib.get_current_player.restype = ctypes.c_int
+        self.lib.get_cell.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.lib.get_cell.restype = ctypes.c_int
+        self.lib.set_board_state.argtypes = [_board_t]
+        self.lib.set_board_state.restype = None
+
+        # rules.h
+        self.lib.check_winner.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.lib.check_winner.restype = ctypes.c_int
+        self.lib.get_win_line.argtypes = [ctypes.c_int, ctypes.c_int, _win_t, _win_t]
+        self.lib.get_win_line.restype = ctypes.c_int
+
+        # rules.h — direct-board variants (no static sync needed)
+        self.lib.check_winner_on.argtypes = [_board_t, ctypes.c_int, ctypes.c_int]
+        self.lib.check_winner_on.restype = ctypes.c_int
+        self.lib.get_win_line_on.argtypes = [_board_t, ctypes.c_int, ctypes.c_int, _win_t, _win_t]
+        self.lib.get_win_line_on.restype = ctypes.c_int
+
         self.lib.board_init()
 
-    def place(self, x, y, color):
-        return self.lib.place_piece(x, y, color)
+    def check_winner_on(self, board, x, y):
+        """Check win at (x,y) on a caller-owned ctypes board. Returns color or 0."""
+        return self.lib.check_winner_on(board, x, y)
 
-    def check_winner(self):
-        return self.lib.check_winner()
+    def get_win_line_on(self, board, x, y):
+        """Extract the 5 winning coordinates from a caller-owned ctypes board."""
+        xs = _win_t()
+        ys = _win_t()
+        if self.lib.get_win_line_on(board, x, y, xs, ys):
+            return [(xs[i], ys[i]) for i in range(5)]
+        return None
 
-    def reset(self):
-        self.lib.reset_game()
 
-    def get_current_player(self):
-        return self.lib.get_current_player()
+_engine = None
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = GameEngine()
+    return _engine
+
+
+def check_winner_on_board(board, x, y):
+    """Check win at (x,y) on a ctypes board. Returns (color, win_line).
+
+    color: 0 = no winner, 1 = black, 2 = white
+    win_line: list of 5 (x,y) tuples, or None
+    """
+    engine = get_engine()
+    color = engine.check_winner_on(board, x, y)
+    if color:
+        return color, engine.get_win_line_on(board, x, y)
+    return 0, None
