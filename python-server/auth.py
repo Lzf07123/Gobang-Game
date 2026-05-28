@@ -5,7 +5,7 @@ import bcrypt
 import jwt
 import time
 import mysql.connector
-from db import execute_query
+from db import execute_query, set_user_session
 
 _USERNAME_RE = re.compile(r'^[\w一-鿿]{2,20}$')
 
@@ -26,19 +26,23 @@ def _check_password(password, hashed):
     return bcrypt.checkpw(password.encode(), hashed.encode())
 
 
-def _make_token(username):
-    payload = {'username': username, 'exp': int(time.time()) + _JWT_EXPIRY}
+def _make_token(username, session_id):
+    payload = {
+        'username': username,
+        'session_id': session_id,
+        'exp': int(time.time()) + _JWT_EXPIRY,
+    }
     return jwt.encode(payload, _JWT_SECRET, algorithm='HS256')
 
 
 def verify_token(token):
     try:
         payload = jwt.decode(token, _JWT_SECRET, algorithms=['HS256'])
-        return payload['username']
+        return payload['username'], payload.get('session_id', '')
     except jwt.ExpiredSignatureError:
-        return None
+        return None, None
     except jwt.InvalidTokenError:
-        return None
+        return None, None
 
 
 def register(username, password):
@@ -74,5 +78,8 @@ def login(username, password):
     if not _check_password(password, rows[0]['password_hash']):
         return False, "用户名或密码错误"
 
-    token = _make_token(username)
+    session_id = secrets.token_hex(16)
+    set_user_session(username, session_id)
+
+    token = _make_token(username, session_id)
     return True, token

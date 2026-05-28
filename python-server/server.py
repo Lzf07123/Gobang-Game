@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from db import (init_db, execute_query, check_env, save_game,
     get_user_games, get_game_moves, get_user_stats,
     init_active_games_table, save_active_game, update_active_game,
-    delete_active_game)
+    delete_active_game, get_user_session, clear_user_session)
 from auth import register, login, verify_token
 from game_engine import check_winner_on_board, make_board, board_to_list, BOARD_SIZE
 
@@ -381,14 +381,39 @@ async def _on_message(ws, raw):
 
 
 async def _handle_auth(ws, token):
-    username = verify_token(token)
+    username, session_id = verify_token(token)
     if not username:
         await _send(ws, {'type': 'error', 'error': 'Token无效或已过期'})
         await ws.close()
         return
 
+    # Kick existing connection with different session_id
+    to_kick = []
+    for existing_ws, info in list(clients.items()):
+        if info['username'] == username and info.get('session_id') != session_id:
+            to_kick.append(existing_ws)
+    for old_ws in to_kick:
+        # Remove from waiting queue if present
+        waiting_queue.pop(old_ws, None)
+        # Clean up room/game state before disconnecting
+        try:
+            await _handle_leave_room(old_ws)
+        except Exception:
+            pass
+        try:
+            await _send(old_ws, {'type': 'kicked', 'message': '账号在其他设备登录'})
+            await old_ws.close()
+        except Exception:
+            pass
+        clients.pop(old_ws, None)
+
     pending_auth.pop(ws, None)
-    clients[ws] = {'username': username, 'room_id': None, 'authenticated': True}
+    clients[ws] = {
+        'username': username,
+        'room_id': None,
+        'authenticated': True,
+        'session_id': session_id,
+    }
     await _send(ws, {'type': 'auth_ok', 'username': username})
 
 
@@ -1050,7 +1075,15 @@ async def _on_disconnect(ws):
 
     # Leave room if in one
     if ws in clients:
+        info = clients[ws]
         await _handle_leave_room(ws)
+        # Only clear session if this was the active session
+        try:
+            stored = await _run_db(get_user_session, info['username'])
+            if stored == info.get('session_id', ''):
+                await _run_db(clear_user_session, info['username'])
+        except Exception:
+            pass
 
     clients.pop(ws, None)
 

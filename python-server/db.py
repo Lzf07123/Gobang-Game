@@ -61,9 +61,57 @@ def init_db():
             FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            username VARCHAR(50) PRIMARY KEY,
+            session_id VARCHAR(64) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def set_user_session(username, session_id):
+    """Record or update the active session for a user."""
+    conn = _get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO user_sessions (username, session_id) "
+            "VALUES (%s, %s) ON DUPLICATE KEY UPDATE session_id = %s, created_at = CURRENT_TIMESTAMP",
+            (username, session_id, session_id)
+        )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def clear_user_session(username):
+    """Remove the active session record for a user."""
+    conn = _get_conn()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM user_sessions WHERE username = %s", (username,))
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def get_user_session(username):
+    """Return the current session_id for a user, or None if not set."""
+    conn = _get_conn()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT session_id FROM user_sessions WHERE username = %s", (username,))
+        row = cursor.fetchone()
+        return row['session_id'] if row else None
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def save_game(room_id, black_username, white_username, winner, reason, moves):

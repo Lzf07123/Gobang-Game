@@ -18,6 +18,7 @@ let timerInterval = null;
 let matching = false;  // currently in matchmaking queue
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+let kickedOut = false;
 const MAX_RECONNECT = 8;
 
 // Game records for replay
@@ -169,6 +170,7 @@ async function doLogin() {
       password: document.getElementById('password').value,
     });
     if (res.success) {
+      kickedOut = false;
       token = res.token;
       username = res.username;
       localStorage.setItem('goban_token', token);
@@ -249,6 +251,23 @@ function showAuthArea() {
   }
 }
 
+function handleKicked(message) {
+  kickedOut = true;
+  token = '';
+  username = '';
+  localStorage.removeItem('goban_token');
+  localStorage.removeItem('goban_username');
+
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+
+  alert(message);
+  showAuthArea();
+}
+
 // ===== WebSocket =====
 function connectWS() {
   if (ws) { ws.onclose = null; ws.close(); }
@@ -263,6 +282,7 @@ function connectWS() {
   ws.onclose = () => {
     ws = null;
     matching = false;
+    if (kickedOut) return;
     if (reconnectAttempts >= MAX_RECONNECT) {
       setStatus('连接失败，请刷新页面重试');
       reconnectAttempts = 0;
@@ -497,6 +517,10 @@ function handleMessage(data) {
         playTickSound();
       }
       break;
+
+    case 'kicked':
+      handleKicked(data.message || '账号在其他设备登录');
+      return;
   }
 }
 
@@ -1305,6 +1329,7 @@ document.addEventListener('click', (e) => {
   const savedToken = localStorage.getItem('goban_token');
   const savedUsername = localStorage.getItem('goban_username');
   if (savedToken && savedUsername) {
+    kickedOut = false;
     token = savedToken;
     username = savedUsername;
     showGameArea(username);
